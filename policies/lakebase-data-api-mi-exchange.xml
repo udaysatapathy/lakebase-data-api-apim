@@ -17,8 +17,7 @@
       lakebase-data-api-url    Data API REST endpoint, .../rest/<database>          (no trailing slash)
       lakebase-mi-client-id    client ID of the user-assigned MI attached to APIM
 
-    Response headers added for observability: X-Lakebase-Token-Source (cache | exchange) and, on an exchange,
-    X-Lakebase-Token-Exchange-Ms (time spent getting the MI token and exchanging it).
+    Response header added for observability: X-Lakebase-Token-Source (cache | exchange).
 
     Gateway-generated errors are JSON: {"error": "<stable code>", "message": "..."}.
 -->
@@ -33,7 +32,6 @@
         <choose>
             <when condition="@(!context.Variables.ContainsKey("dbx-token"))">
                 <set-variable name="token-source" value="exchange" />
-                <set-variable name="exchange-start" value="@(DateTime.UtcNow)" />
                 <authentication-managed-identity resource="api://AzureADTokenExchange" client-id="{{lakebase-mi-client-id}}" output-token-variable-name="entra-token" ignore-error="false" />
                 <send-request mode="new" response-variable-name="exchange-response" timeout="20" ignore-error="false">
                     <set-url>{{lakebase-workspace-url}}/oidc/v1/token</set-url>
@@ -67,7 +65,6 @@
                         </return-response>
                     </when>
                 </choose>
-                <set-variable name="exchange-ms" value="@(((int)(DateTime.UtcNow - (DateTime)context.Variables["exchange-start"]).TotalMilliseconds).ToString())" />
                 <set-variable name="exchange-json" value="@(((IResponse)context.Variables["exchange-response"]).Body.As<JObject>())" />
                 <set-variable name="dbx-token" value="@((string)((JObject)context.Variables["exchange-json"])["access_token"])" />
                 <!-- Expire the cache entry 5 minutes before the token (tokens last 1 hour). -->
@@ -87,13 +84,6 @@
         <set-header name="X-Lakebase-Token-Source" exists-action="override">
             <value>@((string)context.Variables.GetValueOrDefault("token-source", "none"))</value>
         </set-header>
-        <choose>
-            <when condition="@(context.Variables.ContainsKey("exchange-ms"))">
-                <set-header name="X-Lakebase-Token-Exchange-Ms" exists-action="override">
-                    <value>@((string)context.Variables["exchange-ms"])</value>
-                </set-header>
-            </when>
-        </choose>
         <!-- The Data API reports token problems as 400/401 with a message about the token, not as PostgREST
              errors. Drop the cached token so the next request exchanges a fresh one. Grant errors (403, code
              42501) and query errors pass through unchanged. -->

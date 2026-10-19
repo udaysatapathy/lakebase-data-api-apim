@@ -24,11 +24,12 @@ The repo doesn't create the Databricks workspace or the Lakebase project. You br
 
 You need:
 
-- **Tools:** [Terraform](https://developer.hashicorp.com/terraform/install) 1.5 or later, the [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli), the [Databricks CLI](https://learn.microsoft.com/en-us/azure/databricks/dev-tools/cli/install), `psql` and `jq`.
+- **Tools:** [Terraform](https://developer.hashicorp.com/terraform/install) 1.5 or later, the [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli), the [Databricks CLI](https://learn.microsoft.com/en-us/azure/databricks/dev-tools/cli/install) 0.299 or later (for the `postgres` commands), `psql` and `jq`.
 - **Azure:** permission to create a resource group, managed identities and an APIM instance in the subscription.
 - **Entra ID:** permission to create app registrations (for `/lakebase-t`).
 - **Databricks:** account admin on the Databricks account (to add service principals, federation policies and workspace assignments), and ownership of the Lakebase project (to create roles and run the SQL).
-- **An Azure Databricks workspace** with a **Lakebase Autoscaling project**, and the **Data API turned on** for the database you want to serve. On the project's Data API page, add `app` to the exposed schemas next to `public` (for `/lakebase-t`). Don't expose `private`.
+- **An Azure Databricks workspace** with a **[Lakebase Autoscaling project](https://learn.microsoft.com/en-us/azure/databricks/oltp/projects/)**, in a region where Lakebase Autoscaling is available, and the **[Data API](https://learn.microsoft.com/en-us/azure/databricks/oltp/projects/data-api) turned on** for the database you want to serve.
+- **Exposed schemas:** the Data API serves only the schemas listed under exposed schemas on the project's Data API page. Keep `public`, and for `/lakebase-t` add `app` before you run `scripts/10-postgres-setup.sh`. Don't expose `private`, which holds the role-to-tenant mapping.
 
 From the workspace and the project, note:
 
@@ -103,6 +104,21 @@ The Data API runs each request as the Postgres role named in the Databricks toke
 ![How row-level security finds the tenant](docs/images/rls-lookup.png)
 
 See `sql/03-tenant-rls.sql` for the tables, the lookup function and the policies.
+
+## Troubleshooting
+
+| Symptom | Likely cause |
+|---|---|
+| `AADSTS501051` when a client asks Entra ID for a token | The client app has no app role on the gateway app registration, which requires one. Assign a `Tenant.<X>` role |
+| `401` from APIM on `/lakebase-t` with a token that looks valid | The token's audience isn't `api://<gateway-app-id>`, or it comes from another Entra directory |
+| `403` with `no_tenant_role` | The client's token carries no `Tenant.*` app role, or more than one |
+| `500` with `apim_managed_identity_token_failed` | The managed identity isn't attached to APIM, or a named value holds its object ID instead of its client ID |
+| `502` with `lakebase_token_exchange_failed` and `invalid_grant` | The federation policy's subject isn't the managed identity's object ID, or an audience is missing |
+| `400` from the Data API with a message about the token, such as "jwk not found" | The Data API only accepts Databricks tokens. Check that the managed identity's service principal is assigned to the workspace |
+| `403`, code `42501`, "permission denied to set role" | The role isn't granted to `authenticator`. Re-run `scripts/10-postgres-setup.sh` |
+| `403`, code `42501`, "permission denied for table" | The role has no grant on that table. `public.supplier_costs` returns this on purpose |
+| `406`, code `PGRST106` | The schema isn't in the Data API's exposed schemas |
+| `200` with an empty list for every read on `/lakebase-t` | The role isn't in `private.tenant_roles`, so row-level security matches no rows. Re-run `scripts/10-postgres-setup.sh` after any change to the managed identities |
 
 ## Cost and teardown
 
