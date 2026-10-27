@@ -51,57 +51,69 @@ The Data API supports Postgres RLS ([docs](https://learn.microsoft.com/en-us/azu
 
 RLS can only tell apart **Postgres roles**. The Data API offers no other way to get caller identity into SQL:
 
-- Application settings (GUCs) are not supported, so you can't set something like `app.tenant_id` per request.
+- Application settings (GUCs) are not supported, so you can't set something like `app.app_role` per request.
 - The `db-pre-request` function is not supported, so nothing can run per request to read claims.
 - JWT configuration is "not applicable", so there are no `request.jwt.claims`.
 
 So **APIM can't pass the caller's identity to Postgres in a header or claim.** With one MI for every client, all requests share one `current_user`, and RLS sees a single caller. RLS only does something here when different callers arrive as different Postgres roles.
 
-### Option A: one MI per tenant (keeps the gateway pattern)
+### Option A: one MI per app role (keeps the gateway pattern)
 
-Each tenant (customer, business unit, team) gets its own MI and Postgres role. APIM maps the client to its tenant and uses that tenant's MI. RLS then isolates rows by role.
+Each app role (a group of clients, such as one customer or business unit) gets its own MI, Postgres role and group role. APIM maps the client's app role to that app role's MI. RLS then isolates rows by group role.
 
 ```
-Client (tenant A app) ──> APIM ──(Databricks token for id-tenant-a)──> Data API ──(SET ROLE "<id-tenant-a client ID>")──> RLS: tenant_id = 'a'
-Client (tenant B app) ──> APIM ──(Databricks token for id-tenant-b)──> Data API ──(SET ROLE "<id-tenant-b client ID>")──> RLS: tenant_id = 'b'
+Client (app role A) ──> APIM ──(Databricks token for id-app-role-a)──> Data API ──(SET ROLE "<id-app-role-a client ID>")──> RLS: owner_role = 'orders_app_role_a'
+Client (app role B) ──> APIM ──(Databricks token for id-app-role-b)──> Data API ──(SET ROLE "<id-app-role-b client ID>")──> RLS: owner_role = 'orders_app_role_b'
 ```
 
-Keep the role-to-tenant mapping in a schema the Data API doesn't expose, and read it through a `SECURITY DEFINER` function so tenant roles don't need direct access to the mapping table. Inside a `SECURITY DEFINER` function `current_user` is the function's owner, so the policy passes the caller's role in as an argument:
+Each app role gets one `NOLOGIN` group role, and the app role's MI role is its only member. Grants go to the group role, and the member inherits them. Every row records its group role in `owner_role`, which defaults to `private.owner_role()`. That function returns the caller's group role, found in `pg_auth_members`, so no mapping table or `SECURITY DEFINER` function is needed. It returns NULL if the caller belongs to more than one group role, which matches no rows.
 
 ```sql
 CREATE SCHEMA private;                                   -- not in the Data API's exposed schemas
-CREATE TABLE private.tenant_roles (
-  role_name text PRIMARY KEY,                            -- MI client ID
-  tenant_id text NOT NULL
-);
 
-CREATE FUNCTION private.tenant_for(caller text) RETURNS text
-  LANGUAGE sql STABLE SECURITY DEFINER SET search_path = private, pg_temp
-  AS $$ SELECT tenant_id FROM private.tenant_roles WHERE role_name = caller $$;
-REVOKE ALL ON FUNCTION private.tenant_for(text) FROM PUBLIC;
+CREATE FUNCTION private.owner_role() RETURNS text
+  LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp
+  AS $$
+    SELECT CASE WHEN count(*) = 1 THEN min(g.rolname) END
+      FROM pg_auth_members m
+      JOIN pg_roles g ON g.oid = m.roleid
+      JOIN pg_roles u ON u.oid = m.member
+     WHERE u.rolname = current_user
+       AND g.rolname LIKE 'orders\_app\_role\_%'
+  $$;
+REVOKE ALL ON FUNCTION private.owner_role() FROM PUBLIC;
+
+-- Per app role: the MI's role, its authenticator grant, a group role, and the membership.
+SELECT databricks_create_role('<app-role-a-mi-client-id>', 'SERVICE_PRINCIPAL');
+GRANT "<app-role-a-mi-client-id>" TO authenticator;
+CREATE ROLE orders_app_role_a NOLOGIN;
+GRANT orders_app_role_a TO "<app-role-a-mi-client-id>";
+
+CREATE TABLE api.orders (
+  owner_role text NOT NULL DEFAULT private.owner_role(),
+  id         bigint GENERATED ALWAYS AS IDENTITY,
+  PRIMARY KEY (owner_role, id)
+);
 
 ALTER TABLE api.orders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE api.orders FORCE ROW LEVEL SECURITY;         -- also applies to the table owner
-CREATE POLICY tenant_isolation ON api.orders
-  USING (tenant_id = private.tenant_for(current_user))
-  WITH CHECK (tenant_id = private.tenant_for(current_user));   -- blocks writing rows into another tenant
+CREATE POLICY owner_role_isolation ON api.orders
+  USING (owner_role = (SELECT private.owner_role()))
+  WITH CHECK (owner_role = (SELECT private.owner_role()));   -- blocks writing rows into another app role
 
--- Per tenant: role, authenticator grant, mapping row, grants.
-SELECT databricks_create_role('<tenant-a-mi-client-id>', 'SERVICE_PRINCIPAL');
-GRANT "<tenant-a-mi-client-id>" TO authenticator;
-INSERT INTO private.tenant_roles VALUES ('<tenant-a-mi-client-id>', 'a');
-GRANT USAGE ON SCHEMA api, private TO "<tenant-a-mi-client-id>";
-GRANT EXECUTE ON FUNCTION private.tenant_for(text) TO "<tenant-a-mi-client-id>";
-GRANT SELECT, INSERT, UPDATE ON api.orders TO "<tenant-a-mi-client-id>";
+-- Grants go to the group roles, and their members inherit them.
+GRANT USAGE ON SCHEMA api, private TO orders_app_role_a;
+GRANT EXECUTE ON FUNCTION private.owner_role() TO orders_app_role_a;
+GRANT SELECT, INSERT, UPDATE ON api.orders TO orders_app_role_a;
 ```
 
-`private` isn't an exposed schema, so Data API callers can't call `tenant_for` directly. The policy always passes `current_user`, which callers can't change.
+`private` isn't an exposed schema, so Data API callers can't call `owner_role()` directly. It always reads `current_user`, which callers can't change, and the default fills `owner_role` from it, so a caller can't choose another group role.
 
-APIM side: map the client's `appid`/`azp` (or an app role such as `Tenant.A`) to a tenant. Each tenant needs its own `authentication-managed-identity` call (one `choose` branch per MI) and its own cache key (`lakebase-dbx-token-<tenant>`), so one tenant's token is never served to another. The APIM instance needs every tenant MI attached.
+APIM side: read the client's app role (such as `Orders.AppRoleA`) and map it to that app role's MI. Each app role needs its own `authentication-managed-identity` call (one `choose` branch per MI) and its own cache key (`lakebase-dbx-token-app-role-<x>`), so one app role's token is never served to another. The APIM instance needs every app role's MI attached.
 
-Fits: tens of tenants, with tenant onboarding as an infrastructure change (MI, federation policy, Postgres role, mapping row). Doesn't fit: thousands of tenants, or isolation per end user.
+Fits: tens of app roles, with onboarding an app role as an infrastructure change (app role, MI, federation policy, Postgres group role and membership, policy branch). Doesn't fit: thousands of app roles, or isolation per end user.
 
-This repo deploys Option A as the `/lakebase-t` API: see the [README](../README.md).
+This repo deploys Option A as the `/lakebase-rls` API: see the [README](../README.md).
 
 ### Option B: per-user identity (end-to-end)
 
@@ -118,7 +130,7 @@ This repo covers token exchange for managed identities only. Check the exchange 
 | Need | Use |
 |---|---|
 | Access levels differ (read vs write), no row isolation | Default: one MI per access level, no RLS |
-| Rows isolated per tenant, tens of tenants | Option A: one MI per tenant + RLS on `current_user` |
+| Rows isolated per app role, tens of app roles | Option A: one MI per app role + RLS on the caller's group role |
 | Rows isolated per end user, or database audit per person | Option B: per-user identity + RLS on `current_user` |
 | Row isolation enforced by APIM only, Postgres trusts APIM fully | Not possible: the Data API has no way to pass caller identity to SQL |
 
@@ -126,7 +138,7 @@ This repo covers token exchange for managed identities only. Check the exchange 
 
 - **Views bypass RLS by default.** A view runs with its owner's privileges, so RLS on the base table is evaluated as the owner. Create views with `WITH (security_invoker = true)` (Postgres 15+) so policies apply to the caller's role. This matters because the default practice above exposes views, not tables.
 - **Table owners bypass RLS** unless the table has `FORCE ROW LEVEL SECURITY`. Don't let the MI roles own the tables they query.
-- **`SECURITY DEFINER` functions bypass RLS** for the tables they touch, because they run as their owner. Use them deliberately (like the mapping lookup) and pass the caller's role in explicitly; inside them `current_user` is the owner, not the caller.
-- **Writes need `WITH CHECK`.** `USING` filters rows a caller can see or change; `WITH CHECK` stops inserts and updates that would create rows for another tenant.
+- **`SECURITY DEFINER` functions bypass RLS** for the tables they touch, because they run as their owner. Use them deliberately and pass the caller's role in explicitly; inside them `current_user` is the owner, not the caller. The app role design needs none: `private.owner_role()` is a plain SQL function that reads `pg_auth_members`, which every role can read.
+- **Writes need `WITH CHECK`.** `USING` filters rows a caller can see or change; `WITH CHECK` stops inserts and updates that would create rows for another app role.
 - **A table with RLS enabled and no policy returns no rows** (deny by default). Expect empty `200` responses, not `403`, while setting up.
-- **Roles are per branch.** Create roles, mapping rows and policies on the branch that serves the Data API.
+- **Roles are per branch.** Create roles, group roles and policies on the branch that serves the Data API.

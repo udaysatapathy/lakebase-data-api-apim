@@ -80,8 +80,8 @@ variable "enable_mi_api" {
   default     = true
 }
 
-variable "enable_tenant_rls" {
-  description = "Deploy per-tenant access at /lakebase-t: Entra app registrations with one app role per tenant, one managed identity per tenant, and row-level security in Postgres."
+variable "enable_app_role_rls" {
+  description = "Deploy app role access at /lakebase-rls: Entra app registrations with app roles Orders.AppRoleA and Orders.AppRoleB, one managed identity per app role, and row-level security in Postgres."
   type        = bool
   default     = true
 }
@@ -112,10 +112,10 @@ variable "client_secret_lifetime_days" {
 
 locals {
   # The shared managed identity (identities.tf) serves the /lakebase and /lakebase-s APIs.
-  shared_mi  = var.enable_mi_api || var.enable_secret_alternative
-  tenant_rls = var.enable_tenant_rls
-  secret_api = var.enable_secret_alternative
-  # Tenants for per-tenant access. Each needs a <when> branch and a named value in
-  # ../policies/lakebase-data-api-tenant-rls.xml and its rows in ../sql/03-tenant-rls.sql, so the list is fixed here.
-  tenants = local.tenant_rls ? toset(["a", "b"]) : toset([])
+  shared_mi    = var.enable_mi_api || var.enable_secret_alternative
+  app_role_rls = var.enable_app_role_rls
+  secret_api   = var.enable_secret_alternative
+  # App roles (entra.tf). Each needs a <when> branch and a named value in
+  # ../policies/lakebase-data-api-app-role-rls.xml and its group role in ../sql/03-app-role-rls.sql, so the list is fixed here.
+  app_roles = local.app_role_rls ? toset(["a", "b"]) : toset([])
 }

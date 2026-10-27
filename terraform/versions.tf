@@ -40,7 +40,7 @@ provider "azurerm" {
   subscription_id = var.subscription_id
 }
 
-# Entra app registrations for per-tenant access (entra.tf).
+# Entra app registrations for app role access (entra.tf).
 provider "azuread" {
   tenant_id = var.tenant_id
 }
@@ -51,7 +51,7 @@ provider "databricks" {
   host       = "https://accounts.azuredatabricks.net"
   account_id = var.databricks_account_id
   auth_type  = "azure-cli"
-  # Pin the tenant: with several tenants in the az CLI cache, the token can otherwise come from the wrong one
+  # Pin the Entra tenant: with several Entra tenants in the az CLI cache, the token can otherwise come from the wrong one
   # ("Expected iss claim to be https://sts.windows.net/<tenant_id>/").
   azure_tenant_id = var.tenant_id
 }

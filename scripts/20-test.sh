@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Tests through APIM: per-tenant access (/lakebase-t), the single-identity API (/lakebase) and the OAuth-secret
+# Tests through APIM: app role access (/lakebase-rls), the single-identity API (/lakebase) and the OAuth-secret
 # alternative (/lakebase-s), for whichever of them are deployed.
 # Usage: ./scripts/20-test.sh   (after 10-postgres-setup.sh; resets the sample data first unless NO_RESET=1)
-# Prints status, tenant and token-source headers, and a compact body per test; saves bodies to results/<timestamp>/.
+# Prints status, app role and token-source headers, and a compact body per test; saves bodies to results/<timestamp>/.
 # Client tokens and secrets stay in memory.
 source "$(dirname "$0")/common.sh"
 
@@ -33,21 +33,21 @@ t() {
   local hdr="$OUT/$id.headers" body="$OUT/$id.body" meta
   meta="$(curl -sS -o "$body" -D "$hdr" -w '%{http_code} %{time_total}' "$@")"
   LAST_BODY="$(cat "$body")"
-  local tenant source
-  tenant="$(grep -i '^x-lakebase-tenant:' "$hdr" | tr -d '\r' | cut -d' ' -f2 || true)"
+  local role source
+  role="$(grep -i '^x-lakebase-app-role:' "$hdr" | tr -d '\r' | cut -d' ' -f2 || true)"
   source="$(grep -i '^x-lakebase-token-source:' "$hdr" | tr -d '\r' | cut -d' ' -f2 || true)"
-  printf '%-4s %-4s %6.3fs  tenant=%-2s token=%-8s %s\n     %s\n' \
-    "$id" "${meta%% *}" "${meta##* }" "${tenant:--}" "${source:--}" "$label" "$(jq -c . <<<"$LAST_BODY" 2>/dev/null | cut -c1-220 || head -c 220 <<<"$LAST_BODY")"
+  printf '%-4s %-4s %6.3fs  role=%-15s token=%-8s %s\n     %s\n' \
+    "$id" "${meta%% *}" "${meta##* }" "${role:--}" "${source:--}" "$label" "$(jq -c . <<<"$LAST_BODY" 2>/dev/null | cut -c1-220 || head -c 220 <<<"$LAST_BODY")"
 }
 
-if deployed lakebase-t; then
-GW="$BASE/lakebase-t"
+if deployed lakebase-rls; then
+GW="$BASE/lakebase-rls"
 TOKEN_A="$(client_token a)"
 TOKEN_B="$(client_token b)"
 A=(-H "Authorization: Bearer $TOKEN_A" "${JSON[@]}")
 B=(-H "Authorization: Bearer $TOKEN_B" "${JSON[@]}")
-echo "== Per-tenant access: $GW"
-jwt_claims "$TOKEN_A" | jq -c '{aud, iss, appid, ver}'
+echo "== App role access: $GW"
+jwt_claims "$TOKEN_A" | jq -c '{aud, iss, appid, ver, roles}'
 t T1  "A reads its orders"                 "${A[@]}" "$GW/app/orders?order=id"
 t T1b "A reads again (cache)"              "${A[@]}" "$GW/app/orders?order=id"
 t T2  "B reads its orders"                 "${B[@]}" "$GW/app/orders?order=id"
@@ -57,11 +57,11 @@ t T5  "A creates an order"                 -X POST "${A[@]}" -d '{"status":"open
 NEW_ORDER="$(jq -r '.[0].id // empty' <<<"$LAST_BODY")"
 t T6  "A adds a line to it"                -X POST "${A[@]}" -d "{\"order_id\":${NEW_ORDER:-0},\"sku\":\"BEV-001\",\"qty\":2}" "$GW/app/order_lines"
 t T7  "A adds a line to B's order 3"       -X POST "${A[@]}" -d '{"order_id":3,"sku":"BEV-001","qty":2}' "$GW/app/order_lines"
-t T8  "A inserts with tenant_id b"         -X POST "${A[@]}" -d '{"tenant_id":"b"}' "$GW/app/orders"
+t T8  "A inserts with owner_role of B"     -X POST "${A[@]}" -d '{"owner_role":"orders_app_role_b"}' "$GW/app/orders"
 t T9  "A updates B's order 3"              -X PATCH "${A[@]}" -d '{"status":"open"}' "$GW/app/orders?id=eq.3"
 t T9b "B's order 3 unchanged"              "${B[@]}" "$GW/app/orders?id=eq.3&select=id,status"
 t T10 "A changes the catalog"              -X PATCH "${A[@]}" -d '{"price":0}' "$GW/public/products?sku=eq.BEV-001"
-t T11 "A reads private.tenant_roles"       "${A[@]}" "$GW/private/tenant_roles"
+t T11 "A calls private.owner_role()"       "${A[@]}" "$GW/private/rpc/owner_role"
 t T12 "No token"                           "$GW/app/orders"
 t T13 "Wrong audience (ARM token)"         -H "Authorization: Bearer $(az account get-access-token --tenant "$TENANT_ID" --query accessToken -o tsv)" "$GW/app/orders"
 fi

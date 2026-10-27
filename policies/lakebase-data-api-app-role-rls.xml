@@ -1,30 +1,31 @@
 <!--
-    API-scope policy: tenant-aware front for the Lakebase Data API (see README.md, per-tenant access).
+    API-scope policy: app-role-aware front for the Lakebase Data API (see README.md, app role access).
 
     Differences from lakebase-data-api-mi-exchange.xml:
       * Callers authenticate with an Entra token for the gateway app registration (no subscription key needed).
-      * The token must carry exactly one app role named Tenant.<X>. That picks the tenant's managed identity,
-        so the request reaches Postgres as that tenant's role and row-level security filters the rows.
-      * One cached Databricks token per tenant (cache key lakebase-dbx-token-<tenant>).
+      * The token must carry exactly one app role named Orders.AppRole<X>. That picks the app role's managed
+        identity, so the request reaches Postgres as that identity's role and row-level security filters the rows.
+      * One cached Databricks token per app role (cache key lakebase-dbx-token-app-role-<x>).
 
     Named values (none are secrets):
-      entra-tenant-id                   Entra tenant (directory) ID
-      lakebase-gateway-app-id           application (client) ID of the gateway app registration
-      lakebase-workspace-url            https://adb-<workspace-id>.<n>.azuredatabricks.net   (no trailing slash)
-      lakebase-data-api-url             Data API REST endpoint, .../rest/<database>          (no trailing slash)
-      lakebase-mi-tenant-a-client-id    client ID of tenant A's managed identity
-      lakebase-mi-tenant-b-client-id    client ID of tenant B's managed identity
+      entra-tenant-id                     Entra tenant (directory) ID
+      lakebase-gateway-app-id             application (client) ID of the gateway app registration
+      lakebase-workspace-url              https://adb-<workspace-id>.<n>.azuredatabricks.net   (no trailing slash)
+      lakebase-data-api-url               Data API REST endpoint, .../rest/<database>          (no trailing slash)
+      lakebase-mi-app-role-a-client-id    client ID of the managed identity for app role Orders.AppRoleA
+      lakebase-mi-app-role-b-client-id    client ID of the managed identity for app role Orders.AppRoleB
 
-    Adding a tenant: an app role Tenant.<X>, a managed identity attached to APIM (with its Databricks service
-    principal and federation policy), a named value, a <when> branch below, and its rows in private.tenant_roles.
+    Adding an app role: an app role Orders.AppRole<X>, a managed identity attached to APIM (with its Databricks
+    service principal and federation policy), a named value, a <when> branch below, and a Postgres group role
+    orders_app_role_<x> with the managed identity's role as its member.
 
-    Response header X-Lakebase-Tenant shows which tenant the request ran as; X-Lakebase-Token-Source shows
+    Response header X-Lakebase-App-Role shows which app role the request ran as; X-Lakebase-Token-Source shows
     cache | exchange.
 -->
 <policies>
     <inbound>
         <base />
-        <!-- 1. Who is calling: a valid token from this tenant, issued for the gateway app registration.
+        <!-- 1. Who is calling: a valid token from this Entra tenant, issued for the gateway app registration.
              v1 tokens carry the api:// URI as aud, v2 tokens the bare app ID; accept both. -->
         <validate-azure-ad-token tenant-id="{{entra-tenant-id}}" header-name="Authorization" failed-validation-httpcode="401" failed-validation-error-message="Missing or invalid Entra token for the Lakebase gateway" output-token-variable-name="client-jwt">
             <audiences>
@@ -32,42 +33,43 @@
                 <audience>{{lakebase-gateway-app-id}}</audience>
             </audiences>
         </validate-azure-ad-token>
-        <!-- 2. Which tenant: exactly one Tenant.<X> app role, otherwise refuse (never guess). -->
-        <set-variable name="tenant" value="@{
+        <!-- 2. Which app role: exactly one Orders.AppRole<X>, otherwise refuse (never guess). -->
+        <set-variable name="app-role" value="@{
             var jwt = (Jwt)context.Variables["client-jwt"];
             var roles = jwt.Claims.ContainsKey("roles") ? jwt.Claims["roles"] : new string[0];
-            var tenants = roles.Where(r => r.StartsWith("Tenant.")).ToArray();
-            return tenants.Length == 1 ? tenants[0].Substring("Tenant.".Length).ToLowerInvariant() : "";
+            var matches = roles.Where(r => r.StartsWith("Orders.AppRole")).ToArray();
+            return matches.Length == 1 ? matches[0] : "";
         }" />
+        <set-variable name="app-role-key" value="@(((string)context.Variables["app-role"]).Replace("Orders.AppRole", "").ToLowerInvariant())" />
         <choose>
-            <when condition="@((string)context.Variables["tenant"] == "")">
+            <when condition="@((string)context.Variables["app-role"] == "")">
                 <return-response>
                     <set-status code="403" reason="Forbidden" />
                     <set-header name="Content-Type" exists-action="override">
                         <value>application/json</value>
                     </set-header>
-                    <set-body>{"error":"no_tenant_role","message":"The token must carry exactly one Tenant.* app role (for example Tenant.A). Assign one to the client app on the gateway app registration."}</set-body>
+                    <set-body>{"error":"no_app_role","message":"The token must carry exactly one Orders.AppRole* app role (for example Orders.AppRoleA). Assign one to the client app on the gateway app registration."}</set-body>
                 </return-response>
             </when>
         </choose>
         <!-- The caller's token stops here. -->
         <set-header name="Authorization" exists-action="delete" />
         <set-header name="Ocp-Apim-Subscription-Key" exists-action="delete" />
-        <set-variable name="cache-key" value="@("lakebase-dbx-token-" + (string)context.Variables["tenant"])" />
+        <set-variable name="cache-key" value="@("lakebase-dbx-token-app-role-" + (string)context.Variables["app-role-key"])" />
         <set-variable name="token-source" value="cache" />
         <cache-lookup-value key="@((string)context.Variables["cache-key"])" variable-name="dbx-token" />
         <choose>
             <when condition="@(!context.Variables.ContainsKey("dbx-token"))">
                 <set-variable name="token-source" value="exchange" />
-                <!-- 3. Tenant to managed identity. One branch per tenant: the MI's client ID must be a fixed value. -->
+                <!-- 3. App role to managed identity. One branch per app role: the MI's client ID must be a fixed value. -->
                 <choose>
-                    <when condition="@((string)context.Variables["tenant"] == "a")">
-                        <set-variable name="mi-client-id" value="{{lakebase-mi-tenant-a-client-id}}" />
-                        <authentication-managed-identity resource="api://AzureADTokenExchange" client-id="{{lakebase-mi-tenant-a-client-id}}" output-token-variable-name="entra-token" ignore-error="false" />
+                    <when condition="@((string)context.Variables["app-role-key"] == "a")">
+                        <set-variable name="mi-client-id" value="{{lakebase-mi-app-role-a-client-id}}" />
+                        <authentication-managed-identity resource="api://AzureADTokenExchange" client-id="{{lakebase-mi-app-role-a-client-id}}" output-token-variable-name="entra-token" ignore-error="false" />
                     </when>
-                    <when condition="@((string)context.Variables["tenant"] == "b")">
-                        <set-variable name="mi-client-id" value="{{lakebase-mi-tenant-b-client-id}}" />
-                        <authentication-managed-identity resource="api://AzureADTokenExchange" client-id="{{lakebase-mi-tenant-b-client-id}}" output-token-variable-name="entra-token" ignore-error="false" />
+                    <when condition="@((string)context.Variables["app-role-key"] == "b")">
+                        <set-variable name="mi-client-id" value="{{lakebase-mi-app-role-b-client-id}}" />
+                        <authentication-managed-identity resource="api://AzureADTokenExchange" client-id="{{lakebase-mi-app-role-b-client-id}}" output-token-variable-name="entra-token" ignore-error="false" />
                     </when>
                     <otherwise>
                         <return-response>
@@ -76,8 +78,8 @@
                                 <value>application/json</value>
                             </set-header>
                             <set-body>@(new JObject(
-                                new JProperty("error", "unknown_tenant"),
-                                new JProperty("message", "No managed identity is configured for tenant '" + (string)context.Variables["tenant"] + "'.")).ToString())</set-body>
+                                new JProperty("error", "unknown_app_role"),
+                                new JProperty("message", "No managed identity is configured for app role '" + (string)context.Variables["app-role"] + "'.")).ToString())</set-body>
                         </return-response>
                     </otherwise>
                 </choose>
@@ -107,8 +109,8 @@
                                 try { code = (string)JObject.Parse(upstream)["error"] ?? ""; } catch (Exception) { }
                                 return new JObject(
                                     new JProperty("error", "lakebase_token_exchange_failed"),
-                                    new JProperty("tenant", (string)context.Variables["tenant"]),
-                                    new JProperty("message", "Databricks rejected the token exchange for this tenant's managed identity. Check its service principal federation policy (issuer, audience, subject)."),
+                                    new JProperty("app_role", (string)context.Variables["app-role"]),
+                                    new JProperty("message", "Databricks rejected the token exchange for this app role's managed identity. Check its service principal federation policy (issuer, audience, subject)."),
                                     new JProperty("upstream_status", r.StatusCode),
                                     new JProperty("upstream_error", code)).ToString();
                             }</set-body>
@@ -130,13 +132,13 @@
     </backend>
     <outbound>
         <base />
-        <set-header name="X-Lakebase-Tenant" exists-action="override">
-            <value>@((string)context.Variables.GetValueOrDefault("tenant", ""))</value>
+        <set-header name="X-Lakebase-App-Role" exists-action="override">
+            <value>@((string)context.Variables.GetValueOrDefault("app-role", ""))</value>
         </set-header>
         <set-header name="X-Lakebase-Token-Source" exists-action="override">
             <value>@((string)context.Variables.GetValueOrDefault("token-source", "none"))</value>
         </set-header>
-        <!-- Token problems come back as 400/401 with a message about the token: drop this tenant's cached token. -->
+        <!-- Token problems come back as 400/401 with a message about the token: drop this app role's cached token. -->
         <choose>
             <when condition="@{
                 var s = context.Response.StatusCode;
@@ -160,7 +162,7 @@
                     </set-header>
                     <set-body>@(new JObject(
                         new JProperty("error", "apim_managed_identity_token_failed"),
-                        new JProperty("tenant", (string)context.Variables.GetValueOrDefault("tenant", "")),
+                        new JProperty("app_role", (string)context.Variables.GetValueOrDefault("app-role", "")),
                         new JProperty("message", context.LastError.Message)).ToString())</set-body>
                 </return-response>
             </when>

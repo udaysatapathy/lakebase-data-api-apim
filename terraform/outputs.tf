@@ -31,24 +31,24 @@ output "apim_mi_client_id" {
   value       = local.shared_mi ? azurerm_user_assigned_identity.this["apim"].client_id : ""
 }
 
-output "tenant_mi_client_ids" {
-  description = "Tenant MIs' client IDs = their Postgres role names (/lakebase-t)."
-  value       = { for t in local.tenants : t => azurerm_user_assigned_identity.this["tenant-${t}"].client_id }
+output "app_role_mi_client_ids" {
+  description = "App role MIs' client IDs = their Postgres role names (/lakebase-rls)."
+  value       = { for r in local.app_roles : r => azurerm_user_assigned_identity.this["app-role-${r}"].client_id }
 }
 
 output "gateway_app_id" {
   description = "Gateway app registration's client ID. Client tokens use scope api://<this>/.default."
-  value       = local.tenant_rls ? azuread_application.gateway[0].client_id : ""
+  value       = local.app_role_rls ? azuread_application.gateway[0].client_id : ""
 }
 
 output "client_app_ids" {
   description = "Sample client apps' client IDs."
-  value       = { for t in local.tenants : t => azuread_application.client[t].client_id }
+  value       = { for t in local.app_roles : t => azuread_application.client[t].client_id }
 }
 
 output "client_secrets" {
   description = "Sample client apps' secrets (for testing)."
-  value       = { for t in local.tenants : t => azuread_application_password.client[t].value }
+  value       = { for t in local.app_roles : t => azuread_application_password.client[t].value }
   sensitive   = true
 }
 
@@ -56,7 +56,7 @@ output "apis" {
   description = "Paths of the deployed APIs on the gateway."
   value = concat(
     var.enable_mi_api ? ["lakebase"] : [],
-    local.tenant_rls ? ["lakebase-t"] : [],
+    local.app_role_rls ? ["lakebase-rls"] : [],
     local.secret_api ? ["lakebase-s"] : [],
   )
 }

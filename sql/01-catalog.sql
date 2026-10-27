@@ -1,6 +1,6 @@
 -- The shared product catalog (public.products) and two functions callable over the Data API.
 -- Run by scripts/10-postgres-setup.sh as the Lakebase project owner, in the database the Data API serves.
--- Grants are in 02-apim-role.sql and 03-tenant-rls.sql. Idempotent: re-running resets the seed rows.
+-- Grants are in 02-apim-role.sql and 03-app-role-rls.sql. Idempotent: re-running resets the seed rows.
 
 \set ON_ERROR_STOP on
 
@@ -14,8 +14,8 @@ CREATE TABLE IF NOT EXISTS public.products (
     updated_at timestamptz NOT NULL DEFAULT now()
 );
 
--- Reset to the seed rows. Upsert rather than TRUNCATE: the tenants' order lines reference these SKUs
--- (03-tenant-rls.sql), and Postgres won't truncate a referenced table.
+-- Reset to the seed rows. Upsert rather than TRUNCATE: the app role demo's order lines reference these SKUs
+-- (03-app-role-rls.sql), and Postgres won't truncate a referenced table.
 DELETE FROM public.products WHERE sku NOT IN ('BEV-001', 'BEV-002', 'SNK-001', 'SNK-002', 'DRY-001');
 INSERT INTO public.products (sku, name, category, price, stock) VALUES
     ('BEV-001', 'Sparkling Water 12pk', 'beverages', 6.99, 120),

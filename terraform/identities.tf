@@ -14,10 +14,10 @@ locals {
   # requested for api://AzureADTokenExchange carry it as their aud claim, so the policies must accept it.
   token_exchange_app_id = "fb60f99c-7a34-4190-8149-302f77469936"
 
-  # Every MI and what it is for: "apim" serves /lakebase and /lakebase-s, "tenant-<x>" serves tenant <x> on /lakebase-t.
+  # Every MI and what it is for: "apim" serves /lakebase and /lakebase-s, "app-role-<x>" serves app role Orders.AppRole<X> on /lakebase-rls.
   mis = merge(
     local.shared_mi ? { apim = "id-${var.prefix}-apim" } : {},
-    { for t in local.tenants : "tenant-${t}" => "id-${var.prefix}-tenant-${t}" },
+    { for r in local.app_roles : "app-role-${r}" => "id-${var.prefix}-app-role-${r}" },
   )
 }
 

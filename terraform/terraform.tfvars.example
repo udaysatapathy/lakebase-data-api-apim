@@ -17,5 +17,5 @@ prefix   = "lbapim"
 
 # Turn off the designs you don't need.
 # enable_mi_api             = true # /lakebase:   one managed identity, subscription key
-# enable_tenant_rls         = true # /lakebase-t: one managed identity per tenant, row-level security
+# enable_app_role_rls         = true # /lakebase-rls: one managed identity per app role, row-level security
 # enable_secret_alternative = true # /lakebase-s: Databricks OAuth secret instead of the token exchange

@@ -33,5 +33,5 @@ jwt_claims() {
   local payload
   payload="$(cut -d. -f2 <<<"$1" | tr '_-' '/+')"
   while (( ${#payload} % 4 )); do payload+="="; done
-  base64 -d <<<"$payload" 2>/dev/null | jq -c '{iss, aud, sub, oid, appid, azp, ver, exp}'
+  base64 -d <<<"$payload" 2>/dev/null | jq -c '{iss, aud, sub, oid, appid, azp, ver, exp, roles}'
 }
