@@ -74,7 +74,7 @@ Run the tests:
 
 The test script calls each deployed API and prints the status code, the app role, and whether the Databricks token came from the cache or a fresh exchange. Response bodies are saved to `results/`, and client tokens and secrets stay in memory.
 
-`demo/crud-demo.sh` (curl) and `demo/lakebase-crud.http` (the VS Code REST Client extension) walk through reads, writes and function calls on `/lakebase`.
+`demo/crud-demo.sh` walks through reads, writes and function calls on `/lakebase` with curl.
 
 ## Try an app role call by hand
 
@@ -157,7 +157,7 @@ A new client with an existing app role needs no change here, only an app role as
 | `policies/` | APIM policies for the three APIs |
 | `sql/` | The catalog, the shared identity's role, and the group roles and app schema with row-level security |
 | `scripts/` | Postgres setup, tests and teardown |
-| `demo/` | curl and REST Client walkthroughs of `/lakebase` |
+| `demo/` | A curl walkthrough of `/lakebase` |
 | `docs/` | Design notes on client identity and RLS options, and the figures |
 
 ## License
